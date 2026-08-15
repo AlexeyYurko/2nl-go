@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"image/color"
 	"math"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
@@ -16,6 +18,8 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"golang.org/x/image/font/basicfont"
 )
+
+const nameLenMax = 6 // keeps HUD lines within the side panel (field starts at x=100)
 
 type Anim struct {
 	x0, y0, x1, y1 float64
@@ -94,12 +98,21 @@ type Game struct {
 	hudLB       []string
 	lbDirty     bool
 
+	gameOver   bool
+	lastScore  int
+	lastRank   int
+	goScoreStr string
+	nameEntry  bool
+	nameBuf    string
+	lastName   string
+
 	lastTS    time.Time
 	logicAcc  float64
 	logicStep float64
 
 	panelScore *ebiten.Image
 	panelLB    *ebiten.Image
+	panelGO    *ebiten.Image
 }
 
 func New() (*Game, error) {
@@ -135,8 +148,11 @@ func New() (*Game, error) {
 
 	g.panelScore = ebiten.NewImage(170, 40)
 	g.panelScore.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
-	g.panelLB = ebiten.NewImage(170, 22+5*16)
+	g.panelLB = ebiten.NewImage(85, 22+5*16) // 8+85 < field left edge (x=100)
 	g.panelLB.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
+
+	g.panelGO = ebiten.NewImage(g.windowW, g.windowH)
+	g.panelGO.Fill(color.NRGBA{0x00, 0x00, 0x00, 0xB0})
 
 	g.cfg = logic.DefaultConfig()
 
@@ -158,13 +174,27 @@ func New() (*Game, error) {
 	return g, nil
 }
 
-func (g *Game) Layout(outsideWidth, outsideHeight int) (w, h int) {
+func (g *Game) Layout(_, _ int) (w, h int) { // fixed logical resolution; outside size ignored
 	return g.windowW, g.windowH
 }
 func (g *Game) WindowW() int { return g.windowW }
 func (g *Game) WindowH() int { return g.windowH }
 
 func (g *Game) Update() error {
+	if g.gameOver {
+		if g.nameEntry {
+			g.handleNameEntry()
+			return nil
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyN) ||
+			inpututil.IsKeyJustPressed(ebiten.KeyEnter) ||
+			inpututil.IsKeyJustPressed(ebiten.KeySpace) {
+			g.gameOver = false
+			g.lastTS = time.Now() // to avoid huge dt on restart
+			g.BeginGame()
+		}
+		return nil
+	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyP) {
 		g.isPaused = !g.isPaused
 	}
@@ -189,6 +219,30 @@ func (g *Game) Update() error {
 
 	g.sfx.Update()
 	return nil
+}
+
+func (g *Game) handleNameEntry() {
+	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) {
+		name := strings.ToUpper(strings.TrimSpace(g.nameBuf))
+		g.lastRank = g.lb.Add(g.lastScore, name)
+		g.lb.Save()
+		g.lbDirty = true
+		g.lastName = name
+		g.nameEntry = false
+		return
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) && g.nameBuf != "" {
+		r := []rune(g.nameBuf)
+		g.nameBuf = string(r[:len(r)-1])
+	}
+	cur := []rune(g.nameBuf)
+	for _, ch := range ebiten.AppendInputChars(nil) {
+		if ch == ' ' || !unicode.IsPrint(ch) || len(cur) >= nameLenMax {
+			continue
+		}
+		cur = append(cur, unicode.ToUpper(ch))
+	}
+	g.nameBuf = string(cur)
 }
 
 func (g *Game) handleInput() {
@@ -234,7 +288,7 @@ func (g *Game) updateAnims(dt float64) {
 }
 
 func (g *Game) updateLogic(dt float64) {
-	// game logic/timers — fixed step
+	// game logic/timers - fixed step
 	g.logicAcc += dt
 	for g.logicAcc >= g.logicStep {
 		if g.settleTimer > 0 {
@@ -268,6 +322,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.drawGhosts(screen)
 	g.drawNextShape(screen)
 	g.drawHUD(screen)
+	if g.gameOver {
+		g.drawGameOver(screen)
+	}
 }
 
 func (g *Game) drawField(screen *ebiten.Image) {
@@ -348,16 +405,16 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 		g.hudLevelVal = g.nl.Round
 		g.hudLevelStr = fmt.Sprintf("Level: %d", g.hudLevelVal)
 	}
-	g.drawHUDText(screen, 28, g.hudScoreStr, color.White)
-	g.drawHUDText(screen, 44, g.hudLevelStr, color.White)
+	g.drawText(screen, 16, 28, g.hudScoreStr, color.White)
+	g.drawText(screen, 16, 44, g.hudLevelStr, color.White)
 
 	if g.lb != nil && len(g.lb.Scores) > 0 {
 		if g.lbDirty {
 			g.lbDirty = false
 			mx := min(5, len(g.lb.Scores))
 			g.hudLB = g.hudLB[:0]
-			for i := 0; i < mx; i++ {
-				g.hudLB = append(g.hudLB, fmt.Sprintf("%2d) %4d", i+1, g.lb.Scores[i].Score))
+			for i := range mx {
+				g.hudLB = append(g.hudLB, fmt.Sprintf("%-6s %4d", g.lb.Scores[i].Name, g.lb.Scores[i].Score))
 			}
 		}
 
@@ -366,22 +423,60 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 		op.GeoM.Translate(8, 52)
 		screen.DrawImage(g.panelLB, op)
 
-		g.drawHUDText(screen, 68, "Best:", color.White)
+		g.drawText(screen, 16, 68, "Best:", color.White)
 		for i := 0; i < len(g.hudLB); i++ {
-			g.drawHUDText(screen, 68+16*(i+1), g.hudLB[i], color.White)
+			g.drawText(screen, 16, 68+16*(i+1), g.hudLB[i], color.White)
 		}
 	}
 }
 
 var hudFace = text.NewGoXFace(basicfont.Face7x13)
 
-func (g *Game) drawHUDText(dst *ebiten.Image, y int, str string, clr color.Color) {
+func (g *Game) drawText(dst *ebiten.Image, x float64, y int, str string, clr color.Color) {
 	op := g.textOp
 	op.GeoM.Reset()
-	op.GeoM.Translate(16, float64(y)-hudFace.Metrics().HAscent)
+	op.GeoM.Translate(x, float64(y)-hudFace.Metrics().HAscent)
 	op.ColorScale.Reset()
 	op.ColorScale.ScaleWithColor(clr)
 	text.Draw(dst, str, hudFace, op)
+}
+
+func (g *Game) drawCenteredText(dst *ebiten.Image, y int, str string, clr color.Color) {
+	w, _ := text.Measure(str, hudFace, 0)
+	g.drawText(dst, (float64(g.windowW)-w)/2, y, str, clr)
+}
+
+func (g *Game) drawGameOver(screen *ebiten.Image) {
+	op := g.tileOp
+	op.GeoM.Reset()
+	screen.DrawImage(g.panelGO, op)
+
+	red := color.NRGBA{255, 0x50, 0x50, 255}
+	yellow := color.NRGBA{255, 0xD0, 0x20, 255}
+	grey := color.NRGBA{0xAA, 0xAA, 0xAA, 255}
+
+	g.drawCenteredText(screen, 216, "GAME OVER", red)
+	g.drawCenteredText(screen, 246, g.goScoreStr, color.White)
+	if g.nameEntry {
+		cursor := " "
+		if time.Now().UnixMilli()/500%2 == 0 {
+			cursor = "_"
+		}
+		g.drawCenteredText(screen, 300, "NAME: "+g.nameBuf+cursor, color.White)
+		g.drawCenteredText(screen, 330, "Enter to confirm", grey)
+		return
+	}
+	if len(g.hudLB) > 0 {
+		g.drawCenteredText(screen, 284, "Best:", color.White)
+		for i := 0; i < len(g.hudLB); i++ {
+			var clr color.Color = color.White
+			if i == g.lastRank {
+				clr = yellow
+			}
+			g.drawCenteredText(screen, 304+16*i, g.hudLB[i], clr)
+		}
+	}
+	g.drawCenteredText(screen, 430, "Press N or Enter for a new game", grey)
 }
 
 func keyRepeat(key ebiten.Key) bool {
@@ -458,14 +553,20 @@ func (g *Game) GameShapeDidLand(_ *logic.NLine) {
 	g.nextShapeTimer = 0.01
 }
 
-func (g *Game) GameDidEnd(_ *logic.NLine) {
-	g.sfx.Play("gameover.mp3", 1.0)
-	if g.lb != nil {
-		g.lb.Add(g.nl.Score)
-		g.lb.Save()
-		g.lbDirty = true
+func (g *Game) GameDidEnd(n *logic.NLine) {
+	if g.gameOver {
+		return // endGame can fire again within the same frame
 	}
-	g.BeginGame()
+	g.sfx.Play("gameover.mp3", 1.0)
+	g.lastScore = n.Score
+	g.lastRank = -1
+	g.nameEntry = false
+	if g.lb != nil && g.lb.Qualifies(n.Score) {
+		g.nameBuf = g.lastName // prefill with previous name
+		g.nameEntry = true
+	}
+	g.goScoreStr = fmt.Sprintf("Score: %d", g.lastScore)
+	g.gameOver = true
 }
 
 func (g *Game) ColorShiftMake(_ *logic.NLine) {}
@@ -531,10 +632,7 @@ func drawArcStroke(dst *ebiten.Image, cx, cy, r, width float32, start, end float
 		return
 	}
 	step := 3.0 * math.Pi / 180.0
-	segs := int(math.Ceil((end - start) / step))
-	if segs < 1 {
-		segs = 1
-	}
+	segs := max(int(math.Ceil((end-start)/step)), 1)
 	a0 := start
 	for i := 0; i < segs; i++ {
 		a1 := a0 + (end-start)/float64(segs)
