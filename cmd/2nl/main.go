@@ -8,7 +8,10 @@ import (
 )
 
 func main() {
-	g := game.New()
+	g, err := game.New()
+	if err != nil {
+		log.Fatal(err)
+	}
 	ebiten.SetWindowTitle("2nLine (Ebiten)")
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetWindowSize(g.WindowW(), g.WindowH())

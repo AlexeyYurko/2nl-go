@@ -1,11 +1,12 @@
 package leaderboard
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -34,7 +35,6 @@ func LoadLeaderboard() *Leaderboard {
 	lb := &Leaderboard{cap: 10, path: defaultLBPath(), Scores: []ScoreEntry{}}
 	if b, err := os.ReadFile(lb.path); err == nil {
 		_ = json.Unmarshal(b, &lb.Scores)
-	} else if !os.IsNotExist(err) {
 	}
 	return lb
 }
@@ -43,14 +43,14 @@ func (lb *Leaderboard) Save() {
 	b, _ := json.MarshalIndent(lb.Scores, "", "  ")
 	_ = os.MkdirAll(filepath.Dir(lb.path), 0o755)
 	tmp := lb.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		fmt.Println("lb write tmp:", err)
-		_ = os.WriteFile(lb.path, b, 0o644)
+		_ = os.WriteFile(lb.path, b, 0o600)
 		return
 	}
 	if err := os.Rename(tmp, lb.path); err != nil {
 		fmt.Println("lb rename:", err)
-		_ = os.WriteFile(lb.path, b, 0o644)
+		_ = os.WriteFile(lb.path, b, 0o600)
 		return
 	}
 }
@@ -60,7 +60,7 @@ func (lb *Leaderboard) Add(score int) {
 		return
 	}
 	lb.Scores = append(lb.Scores, ScoreEntry{Score: score, When: time.Now()})
-	sort.Slice(lb.Scores, func(i, j int) bool { return lb.Scores[i].Score > lb.Scores[j].Score })
+	slices.SortFunc(lb.Scores, func(a, b ScoreEntry) int { return cmp.Compare(b.Score, a.Score) })
 	if len(lb.Scores) > lb.cap {
 		lb.Scores = lb.Scores[:lb.cap]
 	}
