@@ -22,6 +22,8 @@ type NLine struct {
 	Round int
 
 	numShapeTypes int
+	nextID        int
+	over          bool
 }
 
 func NewNLineDefault() *NLine { return NewNLine(DefaultConfig()) }
@@ -43,6 +45,7 @@ func (n *NLine) BeginGame() {
 	n.clearAll()
 	n.Score = 0
 	n.Round = 1
+	n.over = false
 	n.roundShapeCap()
 	if n.NextShape == nil {
 		n.NextShape = n.randomShape(n.cfg.PreviewColumn, n.cfg.PreviewRow)
@@ -52,7 +55,19 @@ func (n *NLine) BeginGame() {
 	}
 }
 
+// Over reports whether the game has ended. All mutating methods are no-ops
+// after that, until BeginGame starts a new game.
+func (n *NLine) Over() bool { return n.over }
+
+func (n *NLine) newTile(column, row, tile int) TileType {
+	n.nextID++
+	return TileType{ID: n.nextID, Column: column, Row: row, Tile: tile}
+}
+
 func (n *NLine) NewShape() (falling, next *Shape) {
+	if n.over {
+		return nil, nil
+	}
 	n.FallingShape = n.NextShape
 	n.NextShape = n.randomShape(n.cfg.PreviewColumn, n.cfg.PreviewRow)
 	n.FallingShape.MoveTo(n.cfg.StartingColumn, n.cfg.StartingRow)
@@ -72,7 +87,7 @@ var shapeDefs = []map[Orientation][]pt{
 }
 
 func (n *NLine) randomShape(c, r int) *Shape {
-	return newShape(c, r, shapeDefs[n.cfg.RNG.Intn(n.numShapeTypes)], n.cfg.RNG)
+	return newShape(n, c, r, shapeDefs[n.cfg.RNG.Intn(n.numShapeTypes)], n.cfg.RNG)
 }
 
 // Spawn offset logic
@@ -152,6 +167,10 @@ func (n *NLine) settleShape() {
 }
 
 func (n *NLine) endGame() {
+	if n.over {
+		return
+	}
+	n.over = true
 	if n.Delegate != nil {
 		n.Delegate.GameDidEnd(n)
 	}
@@ -160,6 +179,9 @@ func (n *NLine) endGame() {
 }
 
 func (n *NLine) DropShape() {
+	if n.over {
+		return
+	}
 	if !n.detectIllegalPlacement() {
 		if n.Delegate != nil {
 			n.Delegate.GameShapeDidDrop(n)
@@ -170,6 +192,9 @@ func (n *NLine) DropShape() {
 }
 
 func (n *NLine) LetShapeFall() {
+	if n.over {
+		return
+	}
 	if n.detectIllegalPlacement() {
 		n.endGame()
 	} else {
@@ -187,6 +212,9 @@ func (n *NLine) LetShapeFall() {
 }
 
 func (n *NLine) RotateShape() {
+	if n.over {
+		return
+	}
 	s := n.FallingShape
 	if s == nil || len(s.Blocks) == 1 {
 		return
@@ -201,14 +229,17 @@ func (n *NLine) RotateShape() {
 	}
 }
 
-func (n *NLine) MoveShapeLeft() {
+func (n *NLine) moveShape(dc, dr int) {
+	if n.over {
+		return
+	}
 	s := n.FallingShape
 	if s == nil {
 		return
 	}
-	s.ShiftBy(-1, 0)
+	s.ShiftBy(dc, dr)
 	if n.detectIllegalPlacement() {
-		s.ShiftBy(1, 0)
+		s.ShiftBy(-dc, -dr)
 		return
 	}
 	if n.Delegate != nil {
@@ -216,52 +247,15 @@ func (n *NLine) MoveShapeLeft() {
 	}
 }
 
-func (n *NLine) MoveShapeRight() {
-	s := n.FallingShape
-	if s == nil {
-		return
-	}
-	s.ShiftBy(1, 0)
-	if n.detectIllegalPlacement() {
-		s.ShiftBy(-1, 0)
-		return
-	}
-	if n.Delegate != nil {
-		n.Delegate.GameShapeDidMove(n)
-	}
-}
-
-func (n *NLine) MoveShapeUp() {
-	s := n.FallingShape
-	if s == nil {
-		return
-	}
-	s.ShiftBy(0, -1)
-	if n.detectIllegalPlacement() {
-		s.ShiftBy(0, 1)
-		return
-	}
-	if n.Delegate != nil {
-		n.Delegate.GameShapeDidMove(n)
-	}
-}
-
-func (n *NLine) MoveShapeDown() {
-	s := n.FallingShape
-	if s == nil {
-		return
-	}
-	s.ShiftBy(0, 1)
-	if n.detectIllegalPlacement() {
-		s.ShiftBy(0, -1)
-		return
-	}
-	if n.Delegate != nil {
-		n.Delegate.GameShapeDidMove(n)
-	}
-}
+func (n *NLine) MoveShapeLeft()  { n.moveShape(-1, 0) }
+func (n *NLine) MoveShapeRight() { n.moveShape(1, 0) }
+func (n *NLine) MoveShapeUp()    { n.moveShape(0, -1) }
+func (n *NLine) MoveShapeDown()  { n.moveShape(0, 1) }
 
 func (n *NLine) ColorShift() {
+	if n.over {
+		return
+	}
 	s := n.FallingShape
 	if s == nil {
 		return
@@ -317,14 +311,21 @@ func (n *NLine) roundShapeCap() {
 }
 
 // matching
+var runDirs = [4]struct {
+	dc, dr int
+	kind   LineType
+}{
+	{1, 0, Horizontal},
+	{0, 1, Vertical},
+	{1, 1, Diagonal},
+	{-1, 1, Diagonal},
+}
+
 func (n *NLine) removeMatches() []*Line {
-	hs := n.detectHorizontalMatches()
-	vs := n.detectVerticalMatches()
-	ds := n.detectDiagonalMatches()
-	all := make([]*Line, 0, len(hs)+len(vs)+len(ds))
-	all = append(all, hs...)
-	all = append(all, vs...)
-	all = append(all, ds...)
+	all := make([]*Line, 0, 4)
+	for _, d := range runDirs {
+		all = append(all, n.detectRuns(d.dc, d.dr, d.kind)...)
+	}
 	// clear blocks
 	for _, ln := range all {
 		for _, t := range ln.Tiles {
@@ -334,101 +335,36 @@ func (n *NLine) removeMatches() []*Line {
 	return all
 }
 
-func (n *NLine) detectHorizontalMatches() []*Line {
+// detectRuns collects maximal runs of 3+ same-tile blocks in direction
+// (dc, dr). Each run is reported exactly once, starting from its first tile
+// (the one with no same-tile predecessor), so overlapping sub-lines of a
+// long run are not double-counted.
+func (n *NLine) detectRuns(dc, dr int, kind LineType) []*Line {
 	var res []*Line
 	for r := 0; r < n.cfg.NumRows; r++ {
-		c := 0
-		for c <= n.cfg.NumColumns-3 {
+		for c := 0; c < n.cfg.NumColumns; c++ {
 			t := n.BlockArray[c][r]
-			if t != nil {
-				mt := t.Tile
-				if n.BlockArray[c+1][r] != nil && n.BlockArray[c+1][r].Tile == mt &&
-					n.BlockArray[c+2][r] != nil && n.BlockArray[c+2][r].Tile == mt {
-					ln := NewLine(Horizontal)
-					for c < n.cfg.NumColumns && n.BlockArray[c][r] != nil && n.BlockArray[c][r].Tile == mt {
-						ln.Add(n.BlockArray[c][r])
-						c++
-					}
-					res = append(res, ln)
-					continue
-				}
+			if t == nil {
+				continue
 			}
-			c++
+			if n.sameTile(c-dc, r-dr, t.Tile) {
+				continue // mid-run, already reported
+			}
+			if !n.sameTile(c+dc, r+dr, t.Tile) || !n.sameTile(c+2*dc, r+2*dr, t.Tile) {
+				continue
+			}
+			ln := NewLine(kind)
+			for cc, rr := c, r; n.sameTile(cc, rr, t.Tile); cc, rr = cc+dc, rr+dr {
+				ln.Add(n.BlockArray[cc][rr])
+			}
+			res = append(res, ln)
 		}
 	}
 	return res
-}
-
-func (n *NLine) detectVerticalMatches() []*Line {
-	var res []*Line
-	for c := 0; c < n.cfg.NumColumns; c++ {
-		r := 0
-		for r <= n.cfg.NumRows-3 {
-			t := n.BlockArray[c][r]
-			if t != nil {
-				mt := t.Tile
-				if n.BlockArray[c][r+1] != nil && n.BlockArray[c][r+1].Tile == mt &&
-					n.BlockArray[c][r+2] != nil && n.BlockArray[c][r+2].Tile == mt {
-					ln := NewLine(Vertical)
-					for r < n.cfg.NumRows && n.BlockArray[c][r] != nil && n.BlockArray[c][r].Tile == mt {
-						ln.Add(n.BlockArray[c][r])
-						r++
-					}
-					res = append(res, ln)
-					continue
-				}
-			}
-			r++
-		}
-	}
-	return res
-}
-
-func (n *NLine) detectDiagonalMatches() []*Line {
-	var res []*Line
-	// /
-	for row := 0; row <= n.cfg.NumRows-3; row++ {
-		for col := 0; col <= n.cfg.NumColumns-3; col++ {
-			if ln := n.collectRun(col, row, 1, 1); ln != nil {
-				res = append(res, ln)
-			}
-		}
-	}
-	// \
-	for row := 0; row <= n.cfg.NumRows-3; row++ {
-		for col := n.cfg.NumColumns - 1; col >= 2; col-- {
-			if ln := n.collectRun(col, row, -1, 1); ln != nil {
-				res = append(res, ln)
-			}
-		}
-	}
-	return res
-}
-
-func (n *NLine) collectRun(c, r, dc, dr int) *Line {
-	if !n.inBounds(c, r) || !n.inBounds(c+dc, r+dr) || !n.inBounds(c+2*dc, r+2*dr) {
-		return nil
-	}
-	t := n.BlockArray[c][r]
-	if t == nil {
-		return nil
-	}
-	mt := t.Tile
-	if !n.sameTile(c+dc, r+dr, mt) || !n.sameTile(c+2*dc, r+2*dr, mt) {
-		return nil
-	}
-	ln := NewLine(Diagonal)
-	for n.inBounds(c, r) && n.sameTile(c, r, mt) {
-		ln.Add(n.BlockArray[c][r])
-		c += dc
-		r += dr
-	}
-	return ln
 }
 
 func (n *NLine) sameTile(c, r, tile int) bool {
-	t := n.BlockArray[c][r]
-	return t != nil && t.Tile == tile
+	return n.inBounds(c, r) && n.BlockArray[c][r] != nil && n.BlockArray[c][r].Tile == tile
 }
 
 func (n *NLine) inBounds(c, r int) bool {

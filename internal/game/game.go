@@ -7,6 +7,7 @@ import (
 	"2nline/internal/sfx"
 	"fmt"
 	"image/color"
+	"log"
 	"math"
 	"strings"
 	"time"
@@ -19,7 +20,33 @@ import (
 	"golang.org/x/image/font/basicfont"
 )
 
-const nameLenMax = 6 // keeps HUD lines within the side panel (field starts at x=100)
+const (
+	updateStep = 1.0 / 60.0 // Ebitengine default TPS: one Update call = one logic tick
+
+	nameLenMax = 6 // keeps HUD lines within the side panel (field starts at x=100)
+
+	keyRepeatDelay    = 12 // ticks before key auto-repeat begins (~0.2 s)
+	keyRepeatInterval = 2  // ticks between auto-repeats
+
+	hudLineH = 16
+
+	goTitleY    = 216
+	goScoreY    = 246
+	goNameY     = 300
+	goNameHintY = 330
+	goBestY     = 284
+	goListY     = 304
+	goHintY     = 430
+)
+
+type gameState int
+
+const (
+	statePlaying gameState = iota
+	statePaused
+	stateNameEntry
+	stateGameOver
+)
 
 type Anim struct {
 	x0, y0, x1, y1 float64
@@ -70,9 +97,9 @@ type Game struct {
 	windowH    int
 	layerOffX  float64
 	layerOffY  float64
-	isPaused   bool
+	state      gameState
 	timeLeft   float64 // seconds to tick
-	tickLength float64 // seconds
+	tickLength float64 // seconds per shape
 
 	anims          map[int]*Anim
 	lastVis        map[int][2]float64
@@ -88,8 +115,9 @@ type Game struct {
 
 	lb *leaderboard.Leaderboard
 
-	tileOp *ebiten.DrawImageOptions
-	textOp *text.DrawOptions
+	tileOp     *ebiten.DrawImageOptions
+	textOp     *text.DrawOptions
+	textWidths map[string]float64
 
 	hudScoreVal int
 	hudScoreStr string
@@ -98,21 +126,33 @@ type Game struct {
 	hudLB       []string
 	lbDirty     bool
 
-	gameOver   bool
 	lastScore  int
 	lastRank   int
 	goScoreStr string
-	nameEntry  bool
 	nameBuf    string
 	lastName   string
-
-	lastTS    time.Time
-	logicAcc  float64
-	logicStep float64
 
 	panelScore *ebiten.Image
 	panelLB    *ebiten.Image
 	panelGO    *ebiten.Image
+}
+
+// tickForRound returns the shape-settle time budget for a level. Mirrors the
+// original incremental rule: -1 s per level down to 2 s, then -0.15 s per
+// level with a 0.3 s floor.
+func tickForRound(round int) float64 {
+	t := 15.0
+	for r := 2; r <= round && t > 0.3; r++ {
+		if t >= 2 {
+			t--
+			continue
+		}
+		t -= 0.15
+		if t < 0.3 {
+			t = 0.3
+		}
+	}
+	return t
 }
 
 func New() (*Game, error) {
@@ -121,16 +161,16 @@ func New() (*Game, error) {
 		return nil, err
 	}
 	g := &Game{
-		atlas:      atlas,
-		tileSize:   30,
-		scale:      0.5, // assets are @2x ~60px
-		windowW:    480,
-		windowH:    640,
-		tickLength: 15.0,
+		atlas:    atlas,
+		tileSize: 30,
+		scale:    0.5, // assets are @2x ~60px
+		windowW:  480,
+		windowH:  640,
 	}
 
 	g.anims = map[int]*Anim{}
 	g.lastVis = map[int][2]float64{}
+	g.textWidths = map[string]float64{}
 
 	s, err := sfx.LoadSFX()
 	if err != nil {
@@ -138,7 +178,12 @@ func New() (*Game, error) {
 	}
 	g.sfx = s
 
-	g.lb = leaderboard.LoadLeaderboard()
+	if lb, err := leaderboard.LoadLeaderboard(); err != nil {
+		log.Printf("leaderboard: %v; starting with empty scores", err)
+		g.lb = lb
+	} else {
+		g.lb = lb
+	}
 
 	g.tileOp = &ebiten.DrawImageOptions{}
 	g.textOp = &text.DrawOptions{}
@@ -148,7 +193,7 @@ func New() (*Game, error) {
 
 	g.panelScore = ebiten.NewImage(170, 40)
 	g.panelScore.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
-	g.panelLB = ebiten.NewImage(85, 22+5*16) // 8+85 < field left edge (x=100)
+	g.panelLB = ebiten.NewImage(85, 22+5*hudLineH) // 8+85 < field left edge (x=100)
 	g.panelLB.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
 
 	g.panelGO = ebiten.NewImage(g.windowW, g.windowH)
@@ -163,14 +208,10 @@ func New() (*Game, error) {
 	g.timerPosX = float32(g.windowW) - 70
 	g.timerPosY = 70
 
-	g.tickLength = 15.0
-	g.logicStep = 1.0 / 60.0
-	g.lastTS = time.Now()
-
 	nl := logic.NewNLineDefault()
 	nl.Delegate = g
 	g.nl = nl
-	g.BeginGame()
+	g.startNewGame()
 	return g, nil
 }
 
@@ -181,42 +222,40 @@ func (g *Game) WindowW() int { return g.windowW }
 func (g *Game) WindowH() int { return g.windowH }
 
 func (g *Game) Update() error {
-	if g.gameOver {
-		if g.nameEntry {
-			g.handleNameEntry()
-			return nil
+	switch g.state {
+	case statePaused:
+		if inpututil.IsKeyJustPressed(ebiten.KeyP) {
+			g.state = statePlaying
 		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyN) {
+			g.startNewGame()
+		}
+		return nil
+	case stateNameEntry:
+		g.handleNameEntry()
+		return nil
+	case stateGameOver:
 		if inpututil.IsKeyJustPressed(ebiten.KeyN) ||
 			inpututil.IsKeyJustPressed(ebiten.KeyEnter) ||
 			inpututil.IsKeyJustPressed(ebiten.KeySpace) {
-			g.gameOver = false
-			g.lastTS = time.Now() // to avoid huge dt on restart
-			g.BeginGame()
+			g.startNewGame()
 		}
 		return nil
 	}
+
+	// statePlaying
 	if inpututil.IsKeyJustPressed(ebiten.KeyP) {
-		g.isPaused = !g.isPaused
+		g.state = statePaused
+		return nil
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyN) {
-		g.BeginGame()
-	}
-	if g.isPaused {
-		g.lastTS = time.Now() // to avoid huge dt after pause
+		g.startNewGame()
 		return nil
 	}
 
-	now := time.Now()
-	dt := now.Sub(g.lastTS).Seconds()
-	g.lastTS = now
-	if dt > 0.05 { // clamp for lag
-		dt = 0.05
-	}
-
 	g.handleInput()
-	g.updateAnims(dt)
-	g.updateLogic(dt)
-
+	g.updateAnims(updateStep)
+	g.tickLogic()
 	g.sfx.Update()
 	return nil
 }
@@ -225,10 +264,12 @@ func (g *Game) handleNameEntry() {
 	if inpututil.IsKeyJustPressed(ebiten.KeyEnter) {
 		name := strings.ToUpper(strings.TrimSpace(g.nameBuf))
 		g.lastRank = g.lb.Add(g.lastScore, name)
-		g.lb.Save()
+		if err := g.lb.Save(); err != nil {
+			log.Printf("save scores: %v", err)
+		}
 		g.lbDirty = true
 		g.lastName = name
-		g.nameEntry = false
+		g.state = stateGameOver
 		return
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) && g.nameBuf != "" {
@@ -287,31 +328,28 @@ func (g *Game) updateAnims(dt float64) {
 	}
 }
 
-func (g *Game) updateLogic(dt float64) {
-	// game logic/timers - fixed step
-	g.logicAcc += dt
-	for g.logicAcc >= g.logicStep {
-		if g.settleTimer > 0 {
-			g.settleTimer -= g.logicStep
-			if g.settleTimer <= 0 {
-				g.nl.LetShapeFall()
-			}
+// tickLogic advances settle/next-shape timers and the shape countdown by one
+// Update tick; NLine itself is inert after game over.
+func (g *Game) tickLogic() {
+	if g.settleTimer > 0 {
+		g.settleTimer -= updateStep
+		if g.settleTimer <= 0 {
+			g.nl.LetShapeFall()
 		}
-		if g.nextShapeTimer > 0 {
-			g.nextShapeTimer -= g.logicStep
-			if g.nextShapeTimer <= 0 {
-				g.NextShape()
-				g.nextShapeTimer = 0
-			}
+	}
+	if g.nextShapeTimer > 0 {
+		g.nextShapeTimer -= updateStep
+		if g.nextShapeTimer <= 0 {
+			g.nextShapeTimer = 0
+			g.NextShape()
 		}
-		if g.settleTimer <= 0 && g.nextShapeTimer <= 0 {
-			if g.timeLeft <= 0 {
-				g.nl.DropShape()
-			} else {
-				g.timeLeft -= g.logicStep
-			}
+	}
+	if g.settleTimer <= 0 && g.nextShapeTimer <= 0 {
+		if g.timeLeft <= 0 {
+			g.nl.DropShape()
+		} else {
+			g.timeLeft -= updateStep
 		}
-		g.logicAcc -= g.logicStep
 	}
 }
 
@@ -322,7 +360,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 	g.drawGhosts(screen)
 	g.drawNextShape(screen)
 	g.drawHUD(screen)
-	if g.gameOver {
+	if g.state == stateNameEntry || g.state == stateGameOver {
 		g.drawGameOver(screen)
 	}
 }
@@ -425,7 +463,7 @@ func (g *Game) drawHUD(screen *ebiten.Image) {
 
 		g.drawText(screen, 16, 68, "Best:", color.White)
 		for i := 0; i < len(g.hudLB); i++ {
-			g.drawText(screen, 16, 68+16*(i+1), g.hudLB[i], color.White)
+			g.drawText(screen, 16, 68+hudLineH*(i+1), g.hudLB[i], color.White)
 		}
 	}
 }
@@ -442,7 +480,11 @@ func (g *Game) drawText(dst *ebiten.Image, x float64, y int, str string, clr col
 }
 
 func (g *Game) drawCenteredText(dst *ebiten.Image, y int, str string, clr color.Color) {
-	w, _ := text.Measure(str, hudFace, 0)
+	w, ok := g.textWidths[str]
+	if !ok {
+		w, _ = text.Measure(str, hudFace, 0)
+		g.textWidths[str] = w
+	}
 	g.drawText(dst, (float64(g.windowW)-w)/2, y, str, clr)
 }
 
@@ -455,28 +497,28 @@ func (g *Game) drawGameOver(screen *ebiten.Image) {
 	yellow := color.NRGBA{255, 0xD0, 0x20, 255}
 	grey := color.NRGBA{0xAA, 0xAA, 0xAA, 255}
 
-	g.drawCenteredText(screen, 216, "GAME OVER", red)
-	g.drawCenteredText(screen, 246, g.goScoreStr, color.White)
-	if g.nameEntry {
+	g.drawCenteredText(screen, goTitleY, "GAME OVER", red)
+	g.drawCenteredText(screen, goScoreY, g.goScoreStr, color.White)
+	if g.state == stateNameEntry {
 		cursor := " "
 		if time.Now().UnixMilli()/500%2 == 0 {
 			cursor = "_"
 		}
-		g.drawCenteredText(screen, 300, "NAME: "+g.nameBuf+cursor, color.White)
-		g.drawCenteredText(screen, 330, "Enter to confirm", grey)
+		g.drawCenteredText(screen, goNameY, "NAME: "+g.nameBuf+cursor, color.White)
+		g.drawCenteredText(screen, goNameHintY, "Enter to confirm", grey)
 		return
 	}
 	if len(g.hudLB) > 0 {
-		g.drawCenteredText(screen, 284, "Best:", color.White)
+		g.drawCenteredText(screen, goBestY, "Best:", color.White)
 		for i := 0; i < len(g.hudLB); i++ {
 			var clr color.Color = color.White
 			if i == g.lastRank {
 				clr = yellow
 			}
-			g.drawCenteredText(screen, 304+16*i, g.hudLB[i], clr)
+			g.drawCenteredText(screen, goListY+hudLineH*i, g.hudLB[i], clr)
 		}
 	}
-	g.drawCenteredText(screen, 430, "Press N or Enter for a new game", grey)
+	g.drawCenteredText(screen, goHintY, "Press N or Enter for a new game", grey)
 }
 
 func keyRepeat(key ebiten.Key) bool {
@@ -484,10 +526,7 @@ func keyRepeat(key ebiten.Key) bool {
 		return true
 	}
 	d := inpututil.KeyPressDuration(key)
-	if d >= 12 && (d-12)%2 == 0 {
-		return true
-	}
-	return false
+	return d >= keyRepeatDelay && (d-keyRepeatDelay)%keyRepeatInterval == 0
 }
 
 func (g *Game) drawTile(dst *ebiten.Image, col, row int, name string) {
@@ -517,10 +556,14 @@ func (g *Game) pointForColumn(column, row int) (x, y float64) {
 	return x, y
 }
 
-// Delegate mapping
-func (g *Game) BeginGame() {
+// startNewGame resets speed/timers and begins a fresh game; nl.BeginGame
+// fires GameDidBegin → NextShape, which arms timeLeft.
+func (g *Game) startNewGame() {
+	g.tickLength = tickForRound(1)
+	g.settleTimer = 0
+	g.nextShapeTimer = 0
+	g.state = statePlaying
 	g.nl.BeginGame()
-	g.timeLeft = g.tickLength
 }
 
 func (g *Game) GameDidBegin(_ *logic.NLine) {
@@ -554,32 +597,22 @@ func (g *Game) GameShapeDidLand(_ *logic.NLine) {
 }
 
 func (g *Game) GameDidEnd(n *logic.NLine) {
-	if g.gameOver {
-		return // endGame can fire again within the same frame
-	}
 	g.sfx.Play("gameover.mp3", 1.0)
 	g.lastScore = n.Score
 	g.lastRank = -1
-	g.nameEntry = false
 	if g.lb != nil && g.lb.Qualifies(n.Score) {
 		g.nameBuf = g.lastName // prefill with previous name
-		g.nameEntry = true
+		g.state = stateNameEntry
+	} else {
+		g.state = stateGameOver
 	}
 	g.goScoreStr = fmt.Sprintf("Score: %d", g.lastScore)
-	g.gameOver = true
 }
 
 func (g *Game) ColorShiftMake(_ *logic.NLine) {}
 
-func (g *Game) GameDidLevelUp(_ *logic.NLine) {
-	if g.tickLength >= 2 {
-		g.tickLength-- // minus one second per level until we reach 2 sec per shape
-	} else {
-		g.tickLength -= 0.15
-		if g.tickLength < 0.3 {
-			g.tickLength = 0.3
-		}
-	}
+func (g *Game) GameDidLevelUp(n *logic.NLine) {
+	g.tickLength = tickForRound(n.Round)
 	g.sfx.Play("levelup.mp3", 1.0)
 }
 
