@@ -34,17 +34,17 @@ type Shape struct {
 	pos         map[Orientation][]pt
 }
 
-func newShape(column, row int, pos map[Orientation][]pt, rng *rand.Rand) *Shape {
+func newShape(n *NLine, column, row int, pos map[Orientation][]pt, rng *rand.Rand) *Shape {
 	s := &Shape{Column: column, Row: row, Orientation: Orientation(rng.Intn(4)), pos: pos}
-	s.initializeBlocks(rng)
+	s.initializeBlocks(n, rng)
 	return s
 }
 
-func (s *Shape) initializeBlocks(rng *rand.Rand) {
+func (s *Shape) initializeBlocks(n *NLine, rng *rand.Rand) {
 	arr := s.pos[s.Orientation]
 	s.Blocks = make([]TileType, len(arr))
 	for i, d := range arr {
-		s.Blocks[i] = newTile(s.Column+d.dx, s.Row+d.dy, randomForTile(rng))
+		s.Blocks[i] = n.newTile(s.Column+d.dx, s.Row+d.dy, randomForTile(rng))
 	}
 }
 

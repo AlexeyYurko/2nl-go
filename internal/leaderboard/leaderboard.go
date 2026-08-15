@@ -3,7 +3,9 @@ package leaderboard
 import (
 	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,37 +25,47 @@ type Leaderboard struct {
 }
 
 func defaultLBPath() string {
-	dir, _ := os.UserConfigDir()
-	if dir == "" {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
 		dir = "."
 	}
-	dir = filepath.Join(dir, "2nl-go")
-	_ = os.MkdirAll(dir, 0o755)
-	return filepath.Join(dir, "scores.json")
+	return filepath.Join(dir, "2nl-go", "scores.json")
 }
 
-func LoadLeaderboard() *Leaderboard {
+// LoadLeaderboard always returns a usable lb. On read/parse errors it
+// returns an empty one alongside the error — the first Save overwrites the
+// damaged file (self-healing); the caller decides whether to log.
+func LoadLeaderboard() (*Leaderboard, error) {
 	lb := &Leaderboard{cap: 10, path: defaultLBPath(), Scores: []ScoreEntry{}}
-	if b, err := os.ReadFile(lb.path); err == nil {
-		_ = json.Unmarshal(b, &lb.Scores)
+	b, err := os.ReadFile(lb.path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return lb, nil // first run, no scores yet
+		}
+		return lb, fmt.Errorf("read %s: %w", lb.path, err)
 	}
-	return lb
+	if err := json.Unmarshal(b, &lb.Scores); err != nil {
+		lb.Scores = []ScoreEntry{} // discard partial decode
+		return lb, fmt.Errorf("parse %s: %w", lb.path, err)
+	}
+	// trust no ordering in the file: Add/Qualifies rely on descending order
+	slices.SortFunc(lb.Scores, func(a, b ScoreEntry) int { return cmp.Compare(b.Score, a.Score) })
+	return lb, nil
 }
 
-func (lb *Leaderboard) Save() {
-	b, _ := json.MarshalIndent(lb.Scores, "", "  ")
-	_ = os.MkdirAll(filepath.Dir(lb.path), 0o755)
+func (lb *Leaderboard) Save() error {
+	b, err := json.MarshalIndent(lb.Scores, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(lb.path), 0o755); err != nil {
+		return err
+	}
 	tmp := lb.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		fmt.Println("lb write tmp:", err)
-		_ = os.WriteFile(lb.path, b, 0o600)
-		return
+		return err
 	}
-	if err := os.Rename(tmp, lb.path); err != nil {
-		fmt.Println("lb rename:", err)
-		_ = os.WriteFile(lb.path, b, 0o600)
-		return
-	}
+	return os.Rename(tmp, lb.path)
 }
 
 // Qualifies reports whether score would make the leaderboard.
@@ -67,14 +79,19 @@ func (lb *Leaderboard) Qualifies(score int) bool {
 // Add inserts score and returns its 0-based rank, or -1 if it was rejected
 // or did not make the cut
 func (lb *Leaderboard) Add(score int, name string) int {
-	if score <= 0 {
+	if !lb.Qualifies(score) {
 		return -1
 	}
-	when := time.Now()
-	lb.Scores = append(lb.Scores, ScoreEntry{Name: name, Score: score, When: when})
-	slices.SortFunc(lb.Scores, func(a, b ScoreEntry) int { return cmp.Compare(b.Score, a.Score) })
+	idx := len(lb.Scores)
+	for i, e := range lb.Scores {
+		if e.Score < score {
+			idx = i
+			break
+		}
+	}
+	lb.Scores = slices.Insert(lb.Scores, idx, ScoreEntry{Name: name, Score: score, When: time.Now()})
 	if len(lb.Scores) > lb.cap {
 		lb.Scores = lb.Scores[:lb.cap]
 	}
-	return slices.IndexFunc(lb.Scores, func(e ScoreEntry) bool { return e.When.Equal(when) })
+	return idx
 }

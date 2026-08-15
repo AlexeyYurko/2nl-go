@@ -7,13 +7,6 @@ type TileType struct {
 	Tile   int
 }
 
-var _nextID int
-
-func newTile(column, row, tile int) TileType {
-	_nextID++
-	return TileType{ID: _nextID, Column: column, Row: row, Tile: tile}
-}
-
 type Line struct {
 	Tiles []*TileType
 	Type  LineType
