@@ -11,6 +11,7 @@ import (
 )
 
 type ScoreEntry struct {
+	Name  string    `json:"name,omitempty"`
 	Score int       `json:"score"`
 	When  time.Time `json:"when"`
 }
@@ -55,13 +56,25 @@ func (lb *Leaderboard) Save() {
 	}
 }
 
-func (lb *Leaderboard) Add(score int) {
+// Qualifies reports whether score would make the leaderboard.
+func (lb *Leaderboard) Qualifies(score int) bool {
 	if score <= 0 {
-		return
+		return false
 	}
-	lb.Scores = append(lb.Scores, ScoreEntry{Score: score, When: time.Now()})
+	return len(lb.Scores) < lb.cap || score > lb.Scores[len(lb.Scores)-1].Score
+}
+
+// Add inserts score and returns its 0-based rank, or -1 if it was rejected
+// or did not make the cut
+func (lb *Leaderboard) Add(score int, name string) int {
+	if score <= 0 {
+		return -1
+	}
+	when := time.Now()
+	lb.Scores = append(lb.Scores, ScoreEntry{Name: name, Score: score, When: when})
 	slices.SortFunc(lb.Scores, func(a, b ScoreEntry) int { return cmp.Compare(b.Score, a.Score) })
 	if len(lb.Scores) > lb.cap {
 		lb.Scores = lb.Scores[:lb.cap]
 	}
+	return slices.IndexFunc(lb.Scores, func(e ScoreEntry) bool { return e.When.Equal(when) })
 }

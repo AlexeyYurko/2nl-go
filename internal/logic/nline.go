@@ -152,11 +152,11 @@ func (n *NLine) settleShape() {
 }
 
 func (n *NLine) endGame() {
-	n.Score = 0
-	n.Round = 1
 	if n.Delegate != nil {
 		n.Delegate.GameDidEnd(n)
 	}
+	n.Score = 0
+	n.Round = 1
 }
 
 func (n *NLine) DropShape() {
