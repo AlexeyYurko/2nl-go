@@ -667,7 +667,7 @@ func drawArcStroke(dst *ebiten.Image, cx, cy, r, width float32, start, end float
 	step := 3.0 * math.Pi / 180.0
 	segs := max(int(math.Ceil((end-start)/step)), 1)
 	a0 := start
-	for i := 0; i < segs; i++ {
+	for range segs {
 		a1 := a0 + (end-start)/float64(segs)
 		x0 := cx + r*float32(math.Cos(a0))
 		y0 := cy + r*float32(math.Sin(a0))
