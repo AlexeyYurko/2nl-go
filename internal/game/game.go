@@ -84,6 +84,16 @@ type Game struct {
 
 	lb *leaderboard.Leaderboard
 
+	tileOp *ebiten.DrawImageOptions
+	textOp *text.DrawOptions
+
+	hudScoreVal int
+	hudScoreStr string
+	hudLevelVal int
+	hudLevelStr string
+	hudLB       []string
+	lbDirty     bool
+
 	lastTS    time.Time
 	logicAcc  float64
 	logicStep float64
@@ -116,6 +126,12 @@ func New() (*Game, error) {
 	g.sfx = s
 
 	g.lb = leaderboard.LoadLeaderboard()
+
+	g.tileOp = &ebiten.DrawImageOptions{}
+	g.textOp = &text.DrawOptions{}
+	g.lbDirty = true
+	g.hudScoreVal = -1
+	g.hudLevelVal = -1
 
 	g.panelScore = ebiten.NewImage(170, 40)
 	g.panelScore.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
@@ -319,37 +335,51 @@ func (g *Game) drawNextShape(screen *ebiten.Image) {
 func (g *Game) drawHUD(screen *ebiten.Image) {
 	g.drawTimer(screen)
 
-	panel := g.panelScore
-	op := &ebiten.DrawImageOptions{}
+	op := g.tileOp
+	op.GeoM.Reset()
 	op.GeoM.Translate(8, 8)
-	screen.DrawImage(panel, op)
+	screen.DrawImage(g.panelScore, op)
 
-	drawHUDText(screen, 28, fmt.Sprintf("Score: %d", g.nl.Score), color.White)
-	drawHUDText(screen, 44, fmt.Sprintf("Level: %d", g.nl.Round), color.White)
+	if g.nl.Score != g.hudScoreVal {
+		g.hudScoreVal = g.nl.Score
+		g.hudScoreStr = fmt.Sprintf("Score: %d", g.hudScoreVal)
+	}
+	if g.nl.Round != g.hudLevelVal {
+		g.hudLevelVal = g.nl.Round
+		g.hudLevelStr = fmt.Sprintf("Level: %d", g.hudLevelVal)
+	}
+	g.drawHUDText(screen, 28, g.hudScoreStr, color.White)
+	g.drawHUDText(screen, 44, g.hudLevelStr, color.White)
 
-	// leaderboard
 	if g.lb != nil && len(g.lb.Scores) > 0 {
-		mx := 5
-		if len(g.lb.Scores) < mx {
-			mx = len(g.lb.Scores)
+		if g.lbDirty {
+			g.lbDirty = false
+			mx := min(5, len(g.lb.Scores))
+			g.hudLB = g.hudLB[:0]
+			for i := 0; i < mx; i++ {
+				g.hudLB = append(g.hudLB, fmt.Sprintf("%2d) %4d", i+1, g.lb.Scores[i].Score))
+			}
 		}
-		panel := g.panelLB
-		op := &ebiten.DrawImageOptions{}
-		op.GeoM.Translate(8, 52)
-		screen.DrawImage(panel, op)
 
-		drawHUDText(screen, 68, "Best:", color.White)
-		for i := 0; i < mx; i++ {
-			drawHUDText(screen, 68+16*(i+1), fmt.Sprintf("%2d) %4d", i+1, g.lb.Scores[i].Score), color.White)
+		op := g.tileOp
+		op.GeoM.Reset()
+		op.GeoM.Translate(8, 52)
+		screen.DrawImage(g.panelLB, op)
+
+		g.drawHUDText(screen, 68, "Best:", color.White)
+		for i := 0; i < len(g.hudLB); i++ {
+			g.drawHUDText(screen, 68+16*(i+1), g.hudLB[i], color.White)
 		}
 	}
 }
 
 var hudFace = text.NewGoXFace(basicfont.Face7x13)
 
-func drawHUDText(dst *ebiten.Image, y int, str string, clr color.Color) {
-	op := &text.DrawOptions{}
+func (g *Game) drawHUDText(dst *ebiten.Image, y int, str string, clr color.Color) {
+	op := g.textOp
+	op.GeoM.Reset()
 	op.GeoM.Translate(16, float64(y)-hudFace.Metrics().HAscent)
+	op.ColorScale.Reset()
 	op.ColorScale.ScaleWithColor(clr)
 	text.Draw(dst, str, hudFace, op)
 }
@@ -367,7 +397,8 @@ func keyRepeat(key ebiten.Key) bool {
 
 func (g *Game) drawTile(dst *ebiten.Image, col, row int, name string) {
 	img := g.atlas.Get(name)
-	op := &ebiten.DrawImageOptions{}
+	op := g.tileOp
+	op.GeoM.Reset()
 	px, py := g.pointForColumn(col, row)
 	op.GeoM.Scale(g.scale, g.scale)
 	op.GeoM.Translate(px, py)
@@ -376,7 +407,8 @@ func (g *Game) drawTile(dst *ebiten.Image, col, row int, name string) {
 
 func (g *Game) drawTileAt(dst *ebiten.Image, px, py float64, name string, scale float64) {
 	img := g.atlas.Get(name)
-	op := &ebiten.DrawImageOptions{}
+	op := g.tileOp
+	op.GeoM.Reset()
 	op.GeoM.Scale(g.scale*scale, g.scale*scale)
 	op.GeoM.Translate(px, py)
 	dst.DrawImage(img, op)
@@ -431,6 +463,7 @@ func (g *Game) GameDidEnd(_ *logic.NLine) {
 	if g.lb != nil {
 		g.lb.Add(g.nl.Score)
 		g.lb.Save()
+		g.lbDirty = true
 	}
 	g.BeginGame()
 }
