@@ -26,6 +26,6 @@ func DefaultConfig() Config {
 		SpawnEnd:       6,
 		PointsPerLine:  50,
 		LevelThreshold: 1000,
-		RNG:            rand.New(rand.NewSource(time.Now().UnixNano())),
+		RNG:            rand.New(rand.NewSource(time.Now().UnixNano())), //nolint:gosec // game RNG, not security-sensitive
 	}
 }

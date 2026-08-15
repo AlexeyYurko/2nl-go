@@ -3,8 +3,8 @@ package sfx
 import (
 	"bytes"
 	"embed"
+	"fmt"
 	"io"
-	"log"
 	"strings"
 	"sync"
 
@@ -23,10 +23,10 @@ type SFX struct {
 	sampleHz int
 }
 
-func LoadSFX() *SFX {
+func LoadSFX() (*SFX, error) {
 	entries, err := sfxFS.ReadDir("audio")
 	if err != nil {
-		log.Fatalf("read audio dir: %v", err)
+		return nil, err
 	}
 
 	s := &SFX{data: map[string][]byte{}}
@@ -36,25 +36,25 @@ func LoadSFX() *SFX {
 		}
 		b, err := sfxFS.ReadFile("audio/" + e.Name())
 		if err != nil {
-			log.Fatalf("missing sfx %s: %v", e.Name(), err)
+			return nil, fmt.Errorf("missing sfx %s: %w", e.Name(), err)
 		}
 		dec, err := mp3.NewDecoder(bytes.NewReader(b))
 		if err != nil {
-			log.Fatalf("decode mp3 %s: %v", e.Name(), err)
+			return nil, fmt.Errorf("decode mp3 %s: %w", e.Name(), err)
 		}
 		if i == 0 {
 			s.sampleHz = dec.SampleRate()
 			s.ctx = audio.NewContext(s.sampleHz)
 		} else if dec.SampleRate() != s.sampleHz {
-			log.Fatalf("mp3 %s sample rate mismatch: %d != %d", e.Name(), dec.SampleRate(), s.sampleHz)
+			return nil, fmt.Errorf("mp3 %s sample rate mismatch: %d != %d", e.Name(), dec.SampleRate(), s.sampleHz)
 		}
 		pcm, err := io.ReadAll(dec)
 		if err != nil {
-			log.Fatalf("read mp3 %s: %v", e.Name(), err)
+			return nil, fmt.Errorf("read mp3 %s: %w", e.Name(), err)
 		}
 		s.data[e.Name()] = pcm
 	}
-	return s
+	return s, nil
 }
 
 func (s *SFX) Play(name string, vol float64) {

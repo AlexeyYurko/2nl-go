@@ -52,7 +52,7 @@ func (n *NLine) BeginGame() {
 	}
 }
 
-func (n *NLine) NewShape() (*Shape, *Shape) {
+func (n *NLine) NewShape() (falling, next *Shape) {
 	n.FallingShape = n.NextShape
 	n.NextShape = n.randomShape(n.cfg.PreviewColumn, n.cfg.PreviewRow)
 	n.FallingShape.MoveTo(n.cfg.StartingColumn, n.cfg.StartingRow)
@@ -66,31 +66,13 @@ func (n *NLine) NewShape() (*Shape, *Shape) {
 	return n.FallingShape, n.NextShape
 }
 
+var shapeDefs = []map[Orientation][]pt{
+	oneBlock, twoBlock, threeLine, jshort, square,
+	line4, tshape, lshape, jshape, sshape, zshape,
+}
+
 func (n *NLine) randomShape(c, r int) *Shape {
-	switch n.cfg.RNG.Intn(n.numShapeTypes) {
-	case 0:
-		return newShape(c, r, oneBlock, n.cfg.RNG)
-	case 1:
-		return newShape(c, r, twoBlock, n.cfg.RNG)
-	case 2:
-		return newShape(c, r, threeLine, n.cfg.RNG)
-	case 3:
-		return newShape(c, r, jshort, n.cfg.RNG)
-	case 4:
-		return newShape(c, r, square, n.cfg.RNG)
-	case 5:
-		return newShape(c, r, line4, n.cfg.RNG)
-	case 6:
-		return newShape(c, r, tshape, n.cfg.RNG)
-	case 7:
-		return newShape(c, r, lshape, n.cfg.RNG)
-	case 8:
-		return newShape(c, r, jshape, n.cfg.RNG)
-	case 9:
-		return newShape(c, r, sshape, n.cfg.RNG)
-	default:
-		return newShape(c, r, zshape, n.cfg.RNG)
-	}
+	return newShape(c, r, shapeDefs[n.cfg.RNG.Intn(n.numShapeTypes)], n.cfg.RNG)
 }
 
 // Spawn offset logic
@@ -339,7 +321,9 @@ func (n *NLine) removeMatches() []*Line {
 	hs := n.detectHorizontalMatches()
 	vs := n.detectVerticalMatches()
 	ds := n.detectDiagonalMatches()
-	all := append(hs, vs...)
+	all := make([]*Line, 0, len(hs)+len(vs)+len(ds))
+	all = append(all, hs...)
+	all = append(all, vs...)
 	all = append(all, ds...)
 	// clear blocks
 	for _, ln := range all {
@@ -405,20 +389,7 @@ func (n *NLine) detectDiagonalMatches() []*Line {
 	// /
 	for row := 0; row <= n.cfg.NumRows-3; row++ {
 		for col := 0; col <= n.cfg.NumColumns-3; col++ {
-			t := n.BlockArray[col][row]
-			if t == nil {
-				continue
-			}
-			mt := t.Tile
-			if n.BlockArray[col+1][row+1] != nil && n.BlockArray[col+1][row+1].Tile == mt &&
-				n.BlockArray[col+2][row+2] != nil && n.BlockArray[col+2][row+2].Tile == mt {
-				ln := NewLine(Diagonal)
-				c, r := col, row
-				for r < n.cfg.NumRows && c < n.cfg.NumColumns && n.BlockArray[c][r] != nil && n.BlockArray[c][r].Tile == mt {
-					ln.Add(n.BlockArray[c][r])
-					c++
-					r++
-				}
+			if ln := n.collectRun(col, row, 1, 1); ln != nil {
 				res = append(res, ln)
 			}
 		}
@@ -426,23 +397,40 @@ func (n *NLine) detectDiagonalMatches() []*Line {
 	// \
 	for row := 0; row <= n.cfg.NumRows-3; row++ {
 		for col := n.cfg.NumColumns - 1; col >= 2; col-- {
-			t := n.BlockArray[col][row]
-			if t == nil {
-				continue
-			}
-			mt := t.Tile
-			if n.BlockArray[col-1][row+1] != nil && n.BlockArray[col-1][row+1].Tile == mt &&
-				n.BlockArray[col-2][row+2] != nil && n.BlockArray[col-2][row+2].Tile == mt {
-				ln := NewLine(Diagonal)
-				c, r := col, row
-				for r < n.cfg.NumRows && c >= 0 && n.BlockArray[c][r] != nil && n.BlockArray[c][r].Tile == mt {
-					ln.Add(n.BlockArray[c][r])
-					c--
-					r++
-				}
+			if ln := n.collectRun(col, row, -1, 1); ln != nil {
 				res = append(res, ln)
 			}
 		}
 	}
 	return res
+}
+
+func (n *NLine) collectRun(c, r, dc, dr int) *Line {
+	if !n.inBounds(c, r) || !n.inBounds(c+dc, r+dr) || !n.inBounds(c+2*dc, r+2*dr) {
+		return nil
+	}
+	t := n.BlockArray[c][r]
+	if t == nil {
+		return nil
+	}
+	mt := t.Tile
+	if !n.sameTile(c+dc, r+dr, mt) || !n.sameTile(c+2*dc, r+2*dr, mt) {
+		return nil
+	}
+	ln := NewLine(Diagonal)
+	for n.inBounds(c, r) && n.sameTile(c, r, mt) {
+		ln.Add(n.BlockArray[c][r])
+		c += dc
+		r += dr
+	}
+	return ln
+}
+
+func (n *NLine) sameTile(c, r, tile int) bool {
+	t := n.BlockArray[c][r]
+	return t != nil && t.Tile == tile
+}
+
+func (n *NLine) inBounds(c, r int) bool {
+	return c >= 0 && c < n.cfg.NumColumns && r >= 0 && r < n.cfg.NumRows
 }

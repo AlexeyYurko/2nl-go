@@ -2,9 +2,9 @@ package game
 
 import (
 	"2nline/internal/assets"
-	sfx "2nline/internal/audio"
 	"2nline/internal/leaderboard"
 	"2nline/internal/logic"
+	"2nline/internal/sfx"
 	"fmt"
 	"image/color"
 	"math"
@@ -12,7 +12,7 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
-	"github.com/hajimehoshi/ebiten/v2/text"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"github.com/hajimehoshi/ebiten/v2/vector"
 	"golang.org/x/image/font/basicfont"
 )
@@ -47,7 +47,7 @@ func (a *Anim) pos() (x, y, s float64) {
 	x = a.x0 + (a.x1-a.x0)*u
 	y = a.y0 + (a.y1-a.y0)*u
 	s = a.s0 + (a.s1-a.s0)*u
-	return
+	return x, y, s
 }
 
 type Ghost struct {
@@ -92,9 +92,13 @@ type Game struct {
 	panelLB    *ebiten.Image
 }
 
-func New() *Game {
+func New() (*Game, error) {
+	atlas, err := assets.LoadAtlas()
+	if err != nil {
+		return nil, err
+	}
 	g := &Game{
-		atlas:      assets.LoadAtlas(),
+		atlas:      atlas,
 		tileSize:   30,
 		scale:      0.5, // assets are @2x ~60px
 		windowW:    480,
@@ -105,12 +109,18 @@ func New() *Game {
 	g.anims = map[int]*Anim{}
 	g.lastVis = map[int][2]float64{}
 
-	g.sfx = sfx.LoadSFX()
+	s, err := sfx.LoadSFX()
+	if err != nil {
+		return nil, err
+	}
+	g.sfx = s
 
 	g.lb = leaderboard.LoadLeaderboard()
 
 	g.panelScore = ebiten.NewImage(170, 40)
 	g.panelScore.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
+	g.panelLB = ebiten.NewImage(170, 22+5*16)
+	g.panelLB.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
 
 	g.cfg = logic.DefaultConfig()
 
@@ -129,10 +139,10 @@ func New() *Game {
 	nl.Delegate = g
 	g.nl = nl
 	g.BeginGame()
-	return g
+	return g, nil
 }
 
-func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
+func (g *Game) Layout(outsideWidth, outsideHeight int) (w, h int) {
 	return g.windowW, g.windowH
 }
 func (g *Game) WindowW() int { return g.windowW }
@@ -157,20 +167,28 @@ func (g *Game) Update() error {
 		dt = 0.05
 	}
 
-	// Controls
+	g.handleInput()
+	g.updateAnims(dt)
+	g.updateLogic(dt)
+
+	g.sfx.Update()
+	return nil
+}
+
+func (g *Game) handleInput() {
 	if inpututil.IsKeyJustPressed(ebiten.KeyR) {
 		g.nl.RotateShape()
 	}
-	if keyRepeat(ebiten.KeyLeft, 12, 2) {
+	if keyRepeat(ebiten.KeyLeft) {
 		g.nl.MoveShapeLeft()
 	}
-	if keyRepeat(ebiten.KeyRight, 12, 2) {
+	if keyRepeat(ebiten.KeyRight) {
 		g.nl.MoveShapeRight()
 	}
-	if keyRepeat(ebiten.KeyDown, 12, 2) {
+	if keyRepeat(ebiten.KeyDown) {
 		g.nl.MoveShapeDown()
 	}
-	if keyRepeat(ebiten.KeyUp, 12, 2) {
+	if keyRepeat(ebiten.KeyUp) {
 		g.nl.MoveShapeUp()
 	}
 	if inpututil.IsKeyJustPressed(ebiten.KeySpace) {
@@ -179,8 +197,9 @@ func (g *Game) Update() error {
 	if inpututil.IsKeyJustPressed(ebiten.KeyC) {
 		g.nl.ColorShift()
 	}
+}
 
-	// animations — by real dt
+func (g *Game) updateAnims(dt float64) {
 	for id, a := range g.anims {
 		a.step(dt)
 		if a.dead {
@@ -196,7 +215,9 @@ func (g *Game) Update() error {
 			i++
 		}
 	}
+}
 
+func (g *Game) updateLogic(dt float64) {
 	// game logic/timers — fixed step
 	g.logicAcc += dt
 	for g.logicAcc >= g.logicStep {
@@ -222,12 +243,18 @@ func (g *Game) Update() error {
 		}
 		g.logicAcc -= g.logicStep
 	}
-
-	g.sfx.Update()
-	return nil
 }
 
 func (g *Game) Draw(screen *ebiten.Image) {
+	g.drawField(screen)
+	g.drawSettled(screen)
+	g.drawFallingShape(screen)
+	g.drawGhosts(screen)
+	g.drawNextShape(screen)
+	g.drawHUD(screen)
+}
+
+func (g *Game) drawField(screen *ebiten.Image) {
 	// Field (free/spawn)
 	for r := 0; r < g.cfg.NumRows; r++ {
 		for c := 0; c < g.cfg.NumColumns; c++ {
@@ -239,7 +266,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			g.drawTile(screen, c, r, name)
 		}
 	}
+}
 
+func (g *Game) drawSettled(screen *ebiten.Image) {
 	// settled blocks
 	for r := 0; r < g.cfg.NumRows; r++ {
 		for c := 0; c < g.cfg.NumColumns; c++ {
@@ -248,7 +277,9 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 		}
 	}
+}
 
+func (g *Game) drawFallingShape(screen *ebiten.Image) {
 	// falling shape animation
 	if s := g.nl.FallingShape; s != nil {
 		for i := range s.Blocks {
@@ -264,12 +295,17 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			}
 		}
 	}
-	// “explosions”
+}
+
+func (g *Game) drawGhosts(screen *ebiten.Image) {
+	// "explosions"
 	for _, gh := range g.ghosts {
 		x, y, sc := gh.anim.pos()
 		g.drawTileAt(screen, x, y, gh.name, sc)
 	}
+}
 
+func (g *Game) drawNextShape(screen *ebiten.Image) {
 	// preview next shape
 	if ns := g.nl.NextShape; ns != nil {
 		for i := range ns.Blocks {
@@ -278,44 +314,52 @@ func (g *Game) Draw(screen *ebiten.Image) {
 			g.drawTileAt(screen, px, py, assets.ImageName(b.Tile), 1.0)
 		}
 	}
+}
 
+func (g *Game) drawHUD(screen *ebiten.Image) {
 	g.drawTimer(screen)
 
-	panel := ebiten.NewImage(170, 40)
-	panel.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
+	panel := g.panelScore
 	op := &ebiten.DrawImageOptions{}
 	op.GeoM.Translate(8, 8)
 	screen.DrawImage(panel, op)
 
-	text.Draw(screen, fmt.Sprintf("Score: %d", g.nl.Score), basicfont.Face7x13, 16, 28, color.White)
-	text.Draw(screen, fmt.Sprintf("Level: %d", g.nl.Round), basicfont.Face7x13, 16, 44, color.White)
+	drawHUDText(screen, 28, fmt.Sprintf("Score: %d", g.nl.Score), color.White)
+	drawHUDText(screen, 44, fmt.Sprintf("Level: %d", g.nl.Round), color.White)
 
-	// leaderboard (not working as expected)
+	// leaderboard
 	if g.lb != nil && len(g.lb.Scores) > 0 {
 		mx := 5
 		if len(g.lb.Scores) < mx {
 			mx = len(g.lb.Scores)
 		}
-		h := 22 + mx*16
-		panel := ebiten.NewImage(170, h)
-		panel.Fill(color.NRGBA{0x00, 0x00, 0x00, 0x80})
+		panel := g.panelLB
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Translate(8, 52)
 		screen.DrawImage(panel, op)
 
-		text.Draw(screen, "Best:", basicfont.Face7x13, 16, 68, color.White)
+		drawHUDText(screen, 68, "Best:", color.White)
 		for i := 0; i < mx; i++ {
-			text.Draw(screen, fmt.Sprintf("%2d) %4d", i+1, g.lb.Scores[i].Score), basicfont.Face7x13, 16, 68+16*(i+1), color.White)
+			drawHUDText(screen, 68+16*(i+1), fmt.Sprintf("%2d) %4d", i+1, g.lb.Scores[i].Score), color.White)
 		}
 	}
 }
 
-func keyRepeat(key ebiten.Key, initial, interval int) bool {
+var hudFace = text.NewGoXFace(basicfont.Face7x13)
+
+func drawHUDText(dst *ebiten.Image, y int, str string, clr color.Color) {
+	op := &text.DrawOptions{}
+	op.GeoM.Translate(16, float64(y)-hudFace.Metrics().HAscent)
+	op.ColorScale.ScaleWithColor(clr)
+	text.Draw(dst, str, hudFace, op)
+}
+
+func keyRepeat(key ebiten.Key) bool {
 	if inpututil.IsKeyJustPressed(key) {
 		return true
 	}
 	d := inpututil.KeyPressDuration(key)
-	if d >= initial && (d-initial)%interval == 0 {
+	if d >= 12 && (d-12)%2 == 0 {
 		return true
 	}
 	return false
@@ -338,12 +382,12 @@ func (g *Game) drawTileAt(dst *ebiten.Image, px, py float64, name string, scale 
 	dst.DrawImage(img, op)
 }
 
-func (g *Game) pointForColumn(column, row int) (float64, float64) {
+func (g *Game) pointForColumn(column, row int) (x, y float64) {
 	newRow := row - 1
 	newColumn := float64(column) + 0.5
-	x := newColumn*float64(g.tileSize) + float64(column)
-	y := float64(newRow)*float64(g.tileSize) + float64(row)
-	return g.layerOffX + x, g.layerOffY + y
+	x = g.layerOffX + newColumn*float64(g.tileSize) + float64(column)
+	y = g.layerOffY + float64(newRow)*float64(g.tileSize) + float64(row)
+	return x, y
 }
 
 // Delegate mapping
@@ -395,7 +439,7 @@ func (g *Game) ColorShiftMake(_ *logic.NLine) {}
 
 func (g *Game) GameDidLevelUp(_ *logic.NLine) {
 	if g.tickLength >= 2 {
-		g.tickLength -= 1 // minus one second per level until we reach 2 sec per shape
+		g.tickLength-- // minus one second per level until we reach 2 sec per shape
 	} else {
 		g.tickLength -= 0.15
 		if g.tickLength < 0.3 {

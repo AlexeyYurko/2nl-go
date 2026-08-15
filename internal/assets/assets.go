@@ -3,9 +3,9 @@ package assets
 import (
 	"bytes"
 	"embed"
+	"fmt"
 	"image"
-	_ "image/png"
-	"log"
+	_ "image/png" // Register the PNG decoder so image.Decode can read the tile assets.
 	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -18,10 +18,10 @@ type Atlas struct {
 	img map[string]*ebiten.Image
 }
 
-func LoadAtlas() *Atlas {
+func LoadAtlas() (*Atlas, error) {
 	entries, err := assetsFS.ReadDir("images")
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
 	m := map[string]*ebiten.Image{}
 	for _, e := range entries {
@@ -30,15 +30,15 @@ func LoadAtlas() *Atlas {
 		}
 		b, err := assetsFS.ReadFile("images/" + e.Name())
 		if err != nil {
-			log.Fatalf("missing asset %s: %v", e.Name(), err)
+			return nil, fmt.Errorf("missing asset %s: %w", e.Name(), err)
 		}
 		img, _, err := image.Decode(bytes.NewReader(b))
 		if err != nil {
-			log.Fatalf("decode %s: %v", e.Name(), err)
+			return nil, fmt.Errorf("decode %s: %w", e.Name(), err)
 		}
 		m[e.Name()] = ebiten.NewImageFromImage(img)
 	}
-	return &Atlas{img: m}
+	return &Atlas{img: m}, nil
 }
 
 func (a *Atlas) Get(name string) *ebiten.Image {

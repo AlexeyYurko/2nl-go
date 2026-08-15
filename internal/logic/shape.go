@@ -11,13 +11,14 @@ const (
 	TwoSeventy
 )
 
-func rotate(o Orientation, cw bool) Orientation {
-	if cw {
-		if o == TwoSeventy {
-			return Zero
-		}
-		return o + 1
+func rotateCW(o Orientation) Orientation {
+	if o == TwoSeventy {
+		return Zero
 	}
+	return o + 1
+}
+
+func rotateCCW(o Orientation) Orientation {
 	if o == Zero {
 		return TwoSeventy
 	}
@@ -56,13 +57,13 @@ func (s *Shape) rotateBlocks(o Orientation) {
 }
 
 func (s *Shape) RotateClockwise() {
-	no := rotate(s.Orientation, true)
+	no := rotateCW(s.Orientation)
 	s.rotateBlocks(no)
 	s.Orientation = no
 }
 
 func (s *Shape) RotateCounterClockwise() {
-	no := rotate(s.Orientation, false)
+	no := rotateCCW(s.Orientation)
 	s.rotateBlocks(no)
 	s.Orientation = no
 }
